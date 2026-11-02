@@ -31,10 +31,14 @@ const SAVINGS = /подушк|накоп|сбереж|резерв|копил/;
 
 // ---------- storage ----------
 // txs: { id, type: income|expense|transfer, amount, envelopeId, fromEnvelopeId, note, createdAt, moves: [[envelopeId, signedAmount]] }
+// planMode: 'pct' — categories get a share of the remainder (envelope.value, %);
+//           'sum' — categories get a fixed ruble budget per month (envelope.budget).
+// Both numbers are kept, so switching modes back and forth loses nothing.
 function fresh() {
-  const envelopes = DEFAULT_ENVELOPES.map((e, i) => ({ id: i + 1, ...e, sort: i, archived: false }));
-  return { v: 1, nextId: envelopes.length + 1, paydays: [1], envelopes, txs: [] };
+  const envelopes = DEFAULT_ENVELOPES.map((e, i) => ({ id: i + 1, ...e, budget: 0, sort: i, archived: false }));
+  return { v: 1, nextId: envelopes.length + 1, paydays: [1], planMode: 'pct', envelopes, txs: [] };
 }
+const planMode = () => (db.planMode === 'sum' ? 'sum' : 'pct');
 
 function valid(d) {
   return d && d.v === 1 && Array.isArray(d.envelopes) && Array.isArray(d.txs) && Array.isArray(d.paydays) && Number.isInteger(d.nextId);
@@ -115,16 +119,19 @@ export function getEnvelopes(now = Date.now()) {
   }
   return active().map((e) => {
     const p = planned.get(e.id) || 0;
+    const budget = e.budget || 0;
     return {
       id: e.id,
       name: e.name,
       color: e.color,
       kind: e.kind,
       value: e.value,
+      budget,
       balance: bal.get(e.id) || 0,
       planned: p,
       spent: spent.get(e.id) || 0,
-      fixedNeed: e.kind === 'fixed' ? Math.max(0, e.value - p) : 0
+      fixedNeed: e.kind === 'fixed' ? Math.max(0, e.value - p) : 0,
+      need: e.kind === 'pct' ? Math.max(0, budget - p) : 0
     };
   });
 }
@@ -159,6 +166,7 @@ export function state() {
     balance,
     free: balance - envelopes.reduce((s, e) => s + e.balance, 0),
     month: { income: mIncome, spent: mSpent },
+    planMode: planMode(),
     paydays: db.paydays,
     daysLeft: daysUntilPayday(db.paydays),
     history,
@@ -195,7 +203,7 @@ export function addIncome({ amount, source }) {
   const a = toAmount(amount);
   const title = cleanText(source, 40) || 'Поступление';
   const envs = getEnvelopes();
-  const d = distribute(a, envs);
+  const d = distribute(a, envs, planMode());
   return mutate(() => {
     const moves = envs.filter((e) => d.byId[e.id] > 0).map((e) => [e.id, d.byId[e.id]]);
     const t = addTx('income', a, null, null, title, moves);
@@ -235,21 +243,23 @@ export function deleteTx(id) {
   });
 }
 
-export function savePlan({ envelopes, paydays }) {
+export function savePlan({ envelopes, paydays, mode }) {
   if (!Array.isArray(envelopes) || envelopes.length === 0) throw new UserError('Нужен хотя бы один конверт');
   if (envelopes.length > 30) throw new UserError('Слишком много конвертов');
+  const pm = mode === 'sum' ? 'sum' : 'pct';
   const clean = envelopes.map((e, i) => {
     const name = cleanText(e.name, 40);
     if (!name) throw new UserError('У каждого конверта должно быть название');
     const kind = e.kind === 'fixed' ? 'fixed' : 'pct';
-    const value = Math.round(Number(e.value));
-    if (!Number.isFinite(value) || value < 0 || value > 1e9) throw new UserError(`Проверьте сумму в «${name}»`);
+    const value = Math.round(Number(e.value) || 0);
+    const budget = Math.round(Number(e.budget) || 0);
+    if (value < 0 || value > 1e9 || budget < 0 || budget > 1e9) throw new UserError(`Проверьте сумму в «${name}»`);
     if (kind === 'pct' && value > 100) throw new UserError(`Процент в «${name}» больше 100`);
     const color = /^#[0-9a-f]{6}$/i.test(e.color) ? e.color : PALETTE[i % PALETTE.length];
-    return { id: e.id ? Number(e.id) : null, name, kind, value, color, sort: i };
+    return { id: e.id ? Number(e.id) : null, name, kind, value, budget, color, sort: i };
   });
   const pctTotal = clean.filter((e) => e.kind === 'pct').reduce((s, e) => s + e.value, 0);
-  if (pctTotal > 100) throw new UserError(`Проценты в сумме ${pctTotal}% — должно быть не больше 100%`);
+  if (pm === 'pct' && pctTotal > 100) throw new UserError(`Проценты в сумме ${pctTotal}% — должно быть не больше 100%`);
   const pd = [...new Set(parsePaydays(paydays))].sort((a, b) => a - b);
   if (!pd.length) throw new UserError('Укажите хотя бы один день поступления (1–31)');
 
@@ -259,14 +269,15 @@ export function savePlan({ envelopes, paydays }) {
     for (const e of clean) {
       const existing = e.id && db.envelopes.find((x) => x.id === e.id && !x.archived);
       if (existing) {
-        Object.assign(existing, { name: e.name, color: e.color, kind: e.kind, value: e.value, sort: e.sort });
+        Object.assign(existing, { name: e.name, color: e.color, kind: e.kind, value: e.value, budget: e.budget, sort: e.sort });
         kept.add(existing.id);
       } else {
-        db.envelopes.push({ id: db.nextId++, name: e.name, color: e.color, kind: e.kind, value: e.value, sort: e.sort, archived: false });
+        db.envelopes.push({ id: db.nextId++, name: e.name, color: e.color, kind: e.kind, value: e.value, budget: e.budget, sort: e.sort, archived: false });
       }
     }
     for (const e of before) if (!kept.has(e.id)) e.archived = true;
     db.paydays = pd;
+    db.planMode = pm;
     return { ok: true };
   });
 }

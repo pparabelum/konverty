@@ -157,7 +157,7 @@ screens.main = (root) => {
           <span class="swatch" style="background:${e.color}"></span>
           <span class="name">${esc(e.name)}</span>
           <span class="val ${e.balance < 0 ? 'neg' : ''}">${e.balance < 0 ? '−' : ''}${fmt(Math.abs(e.balance))}</span>
-          <span class="of">/ ${k(e.kind === 'fixed' ? e.value : e.planned)}</span>
+          <span class="of">/ ${k(e.kind === 'fixed' ? e.value : s.planMode === 'sum' ? e.budget : e.planned)}</span>
         </div>
         <div class="thin indent"><div style="background:${e.color};width:${pct(e.balance, Math.max(e.planned, e.balance))}"></div></div>
       </button>`
@@ -287,7 +287,13 @@ screens.income = (root) => {
   const input = root.querySelector('#amt');
   const submit = root.querySelector('#submit');
   const update = () => {
-    const d = distribute(amount, S.envelopes);
+    const sumMode = S.planMode === 'sum';
+    const d = distribute(amount, S.envelopes, S.planMode);
+    const rule = (e) => {
+      if (e.kind === 'fixed') return e.value && !e.fixedNeed ? 'оплачено' : e.fixedNeed < e.value ? `ещё ${k(e.fixedNeed)}` : 'фикс.';
+      if (!sumMode) return e.value + '%';
+      return e.budget && !e.need ? 'заполнен' : e.need < e.budget ? `ещё ${k(e.need)}` : `${k(e.budget)}/мес`;
+    };
     const rows = S.envelopes
       .map((e) => {
         const v = d.byId[e.id] || 0;
@@ -296,14 +302,16 @@ screens.income = (root) => {
           <div class="row">
             <span class="swatch" style="background:${e.color}"></span>
             <span class="name">${esc(e.name)}</span>
-            <span class="rule">${e.kind === 'fixed' ? (e.fixedNeed < e.value ? `ещё ${k(e.fixedNeed)}` : 'фикс.') : e.value + '%'}</span>
+            <span class="rule">${rule(e)}</span>
             <span class="sum">${fmt(v)}</span>
           </div>
           <div class="thin indent"><div style="background:${e.color};width:${pct(v, amount)}"></div></div>
         </div>`;
       })
       .join('');
-    const warn = amount && d.short ? `<p class="note warn" style="margin-bottom:8px">На обязательные платежи не хватает ${fmt(d.shortBy)}. Сначала закрываем их, остальные конверты получат 0.</p>` : '';
+    let warn = '';
+    if (amount && d.short) warn = `<p class="note warn" style="margin-bottom:8px">На обязательные платежи не хватает ${fmt(d.shortBy)}. Сначала закрываем их, остальные конверты получат 0.</p>`;
+    else if (amount && d.catsShortBy) warn = `<p class="note muted" style="margin-bottom:8px">До полного бюджета категорий не хватает ${fmt(d.catsShortBy)} — делим пропорционально. Следующее поступление их дозаполнит.</p>`;
     const free = d.free ? `<div class="item"><div class="row"><span class="swatch" style="background:var(--dim)"></span><span class="name">Не распределено</span><span class="sum">${fmt(d.free)}</span></div></div>` : '';
     root.querySelector('#dist').innerHTML = warn + rows + free;
     submit.textContent = 'Распределить ' + fmt(amount);
@@ -449,7 +457,7 @@ screens.envelope = (root, params) => {
 
   root.innerHTML = `
   <div class="screen">
-    ${header('', `<span class="swatch" style="background:${e.color}"></span><h1 class="h1s grow">${esc(e.name)}</h1><span class="sm muted">${e.kind === 'fixed' ? 'фикс. ' + fmt(e.value) : e.value + '% остатка'}</span>`)}
+    ${header('', `<span class="swatch" style="background:${e.color}"></span><h1 class="h1s grow">${esc(e.name)}</h1><span class="sm muted">${e.kind === 'fixed' ? 'фикс. ' + fmt(e.value) : S.planMode === 'sum' ? fmt(e.budget) + ' в мес.' : e.value + '% остатка'}</span>`)}
     <section class="stack" style="gap:6px">
       <span class="sm muted">Можно тратить сегодня</span>
       <span class="big ${e.balance < 0 ? 'neg' : ''}">${fmt(today)}</span>
@@ -471,19 +479,86 @@ screens.envelope = (root, params) => {
 };
 
 screens.plan = (root) => {
-  const items = S.envelopes.map((e) => ({ id: e.id, name: e.name, color: e.color, kind: e.kind, value: e.value, balance: e.balance }));
+  const items = S.envelopes.map((e) => ({ id: e.id, name: e.name, color: e.color, kind: e.kind, value: e.value, budget: e.budget, balance: e.balance }));
   let paydays = S.paydays.join(', ');
+  let mode = S.planMode;
+
+  // First switch to rubles: suggest sums from the current percentages and the last income.
+  const prefillBudgets = () => {
+    const cats = items.filter((e) => e.kind === 'pct');
+    if (cats.some((e) => e.budget > 0)) return;
+    const fixedTotal = items.filter((e) => e.kind === 'fixed').reduce((s, e) => s + e.value, 0);
+    const base = Math.max(0, (S.lastIncomes[0] || 0) - fixedTotal);
+    for (const e of cats) e.budget = Math.round((base * e.value) / 100 / 100) * 100;
+  };
+
+  const categories = (delBtn) => {
+    const cats = items.filter((e) => e.kind === 'pct');
+    const toggle = `
+      <div class="seg" role="group" aria-label="Как задавать бюджет категорий">
+        <button data-mode="pct" aria-pressed="${mode === 'pct'}">В процентах</button>
+        <button data-mode="sum" aria-pressed="${mode === 'sum'}">В рублях</button>
+      </div>`;
+    const name = (e) => `<input class="name-input" data-name="${items.indexOf(e)}" value="${esc(e.name)}" aria-label="Название конверта" maxlength="40">`;
+
+    if (mode === 'sum') {
+      const totalSum = cats.reduce((s, e) => s + e.budget, 0);
+      const fixedTotal = items.filter((e) => e.kind === 'fixed').reduce((s, e) => s + e.value, 0);
+      return `
+      <section class="list">
+        <div class="between list-head" style="align-items:center"><h2 class="cap">Категории в месяц</h2><span class="badge" id="sumBadge">${k(totalSum)} ₽</span></div>
+        ${toggle}
+        <div class="stackbar">${cats.map((e) => `<div style="background:${e.color};width:${pct(e.budget, totalSum)}"></div>`).join('')}</div>
+        ${cats
+          .map(
+            (e) => `
+          <div class="plan-row">
+            <span class="swatch" style="background:${e.color}"></span>
+            ${name(e)}
+            <label class="money"><input inputmode="numeric" data-budget="${items.indexOf(e)}" value="${e.budget || ''}" placeholder="0" aria-label="Сумма в месяц: ${esc(e.name)}"><span>₽</span></label>
+            ${delBtn(e)}
+          </div>`
+          )
+          .join('')}
+        <p class="note muted" style="padding-top:8px" id="sumNote">Всего нужно в месяц: <b>${fmt(fixedTotal + totalSum)}</b> (обязательные ${fmt(fixedTotal)} + категории ${fmt(totalSum)}). Всё, что придёт сверх, останется нераспределённым.</p>
+        <button class="btn dashed" id="addPct">${I.plus}Добавить конверт</button>
+      </section>`;
+    }
+
+    const total = cats.reduce((s, e) => s + e.value, 0);
+    const ok = total === 100;
+    return `
+      <section class="list">
+        <div class="between list-head" style="align-items:center"><h2 class="cap">Остаток по процентам</h2><span class="badge ${ok ? '' : 'bad'}">${total}%</span></div>
+        ${toggle}
+        <div class="stackbar">${cats.map((e) => `<div style="background:${e.color};width:${e.value}%"></div>`).join('')}</div>
+        ${cats
+          .map(
+            (e) => `
+          <div class="plan-row">
+            <span class="swatch" style="background:${e.color}"></span>
+            ${name(e)}
+            <button class="step muted" data-step="${items.indexOf(e)}" data-d="-5" aria-label="Уменьшить: ${esc(e.name)}">${I.minus}</button>
+            <span class="pct">${e.value}%</span>
+            <button class="step muted" data-step="${items.indexOf(e)}" data-d="5" aria-label="Увеличить: ${esc(e.name)}">${I.plus}</button>
+            ${delBtn(e)}
+          </div>`
+          )
+          .join('')}
+        ${ok ? '' : `<p class="note warn" style="padding-top:8px">${total > 100 ? `Перебор на ${total - 100}% — уменьшите какой-нибудь конверт.` : `Не распределено ${100 - total}% — они останутся свободными.`}</p>`}
+        <button class="btn dashed" id="addPct">${I.plus}Добавить конверт</button>
+      </section>`;
+  };
 
   const draw = (focusKind) => {
     const fixed = items.filter((e) => e.kind === 'fixed');
-    const pcts = items.filter((e) => e.kind === 'pct');
-    const total = pcts.reduce((s, e) => s + e.value, 0);
-    const ok = total === 100;
+    const total = items.filter((e) => e.kind === 'pct').reduce((s, e) => s + e.value, 0);
+    const blocked = mode === 'pct' && total > 100;
     const delBtn = (e) => `<button class="del" data-del="${items.indexOf(e)}" aria-label="Удалить: ${esc(e.name)}">${I.close}</button>`;
     root.innerHTML = `
     <div class="screen with-nav">
       <header class="col"><span class="sm muted">Правила распределения</span><h1 class="h1">План</h1></header>
-      <p class="lead">Каждое поступление сначала закрывает обязательные платежи (только то, что ещё не оплачено в этом месяце), остаток делится по процентам.</p>
+      <p class="lead">Каждое поступление сначала закрывает обязательные платежи (только то, что ещё не оплачено в этом месяце), ${mode === 'sum' ? 'потом пополняет каждую категорию до её суммы на месяц.' : 'остаток делится по процентам.'}</p>
 
       <section class="list">
         <h2 class="cap list-head">Обязательные в месяц</h2>
@@ -501,25 +576,7 @@ screens.plan = (root) => {
         <button class="btn dashed" id="addFixed">${I.plus}Добавить платёж</button>
       </section>
 
-      <section class="list">
-        <div class="between list-head" style="align-items:center"><h2 class="cap">Остаток по процентам</h2><span class="badge ${ok ? '' : 'bad'}">${total}%</span></div>
-        <div class="stackbar">${pcts.map((e) => `<div style="background:${e.color};width:${e.value}%"></div>`).join('')}</div>
-        ${pcts
-          .map(
-            (e) => `
-          <div class="plan-row">
-            <span class="swatch" style="background:${e.color}"></span>
-            <input class="name-input" data-name="${items.indexOf(e)}" value="${esc(e.name)}" aria-label="Название конверта" maxlength="40">
-            <button class="step muted" data-step="${items.indexOf(e)}" data-d="-5" aria-label="Уменьшить: ${esc(e.name)}">${I.minus}</button>
-            <span class="pct">${e.value}%</span>
-            <button class="step muted" data-step="${items.indexOf(e)}" data-d="5" aria-label="Увеличить: ${esc(e.name)}">${I.plus}</button>
-            ${delBtn(e)}
-          </div>`
-          )
-          .join('')}
-        ${ok ? '' : `<p class="note warn" style="padding-top:8px">${total > 100 ? `Перебор на ${total - 100}% — уменьшите какой-нибудь конверт.` : `Не распределено ${100 - total}% — они останутся свободными.`}</p>`}
-        <button class="btn dashed" id="addPct">${I.plus}Добавить конверт</button>
-      </section>
+      ${categories(delBtn)}
 
       <section class="stack" style="gap:8px">
         <label for="paydays" class="cap">Дни поступлений</label>
@@ -527,7 +584,7 @@ screens.plan = (root) => {
         <span class="xs muted">Числа месяца через запятую — от них считаются дневные лимиты.</span>
       </section>
 
-      <button class="btn light tall" id="save" ${total > 100 ? 'disabled' : ''}>Сохранить план</button>
+      <button class="btn light tall" id="save" ${blocked ? 'disabled' : ''}>Сохранить план</button>
 
       <section class="stack" style="gap:10px">
         <h2 class="cap">Данные</h2>
@@ -549,6 +606,26 @@ screens.plan = (root) => {
         items[el.dataset.fixed].value = v;
       })
     );
+    root.querySelectorAll('[data-budget]').forEach((el) =>
+      el.addEventListener('input', () => {
+        const v = digits(el.value);
+        el.value = v ? String(v) : '';
+        items[el.dataset.budget].budget = v;
+        // Update totals in place so the field keeps focus while typing.
+        const cats = items.filter((e) => e.kind === 'pct');
+        const totalSum = cats.reduce((s, e) => s + e.budget, 0);
+        const fixedTotal = items.filter((e) => e.kind === 'fixed').reduce((s, e) => s + e.value, 0);
+        root.querySelector('#sumBadge').textContent = `${k(totalSum)} ₽`;
+        root.querySelector('#sumNote b').textContent = fmt(fixedTotal + totalSum);
+        root.querySelectorAll('.stackbar > div').forEach((bar, i) => (bar.style.width = pct(cats[i].budget, totalSum)));
+      })
+    );
+    root.querySelectorAll('[data-mode]').forEach((el) => (el.onclick = () => {
+      if (mode === el.dataset.mode) return;
+      mode = el.dataset.mode;
+      if (mode === 'sum') prefillBudgets();
+      draw();
+    }));
     root.querySelectorAll('[data-step]').forEach((el) => (el.onclick = () => {
       const e = items[el.dataset.step];
       e.value = Math.max(0, Math.min(100, e.value + Number(el.dataset.d)));
@@ -563,13 +640,13 @@ screens.plan = (root) => {
     }));
     root.querySelector('#paydays').addEventListener('input', (ev) => (paydays = ev.target.value));
     const add = (kind) => {
-      items.push({ id: null, name: kind === 'fixed' ? 'Новый платёж' : 'Новый конверт', color: store.PALETTE[items.length % store.PALETTE.length], kind, value: 0, balance: 0 });
+      items.push({ id: null, name: kind === 'fixed' ? 'Новый платёж' : 'Новый конверт', color: store.PALETTE[items.length % store.PALETTE.length], kind, value: 0, budget: 0, balance: 0 });
       draw(kind);
     };
     root.querySelector('#addFixed').onclick = () => add('fixed');
     root.querySelector('#addPct').onclick = () => add('pct');
     root.querySelector('#save').onclick = () => {
-      if (act(() => store.savePlan({ envelopes: items, paydays }), 'План сохранён')) tab('main');
+      if (act(() => store.savePlan({ envelopes: items, paydays, mode }), 'План сохранён')) tab('main');
     };
     root.querySelector('#export').onclick = exportBackup;
     root.querySelector('#import').onclick = () => root.querySelector('#importFile').click();

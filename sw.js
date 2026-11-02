@@ -1,6 +1,6 @@
 // Offline support: the app shell is cached on install; fonts are cached the first time they load.
 // Bump VERSION whenever any app file changes so phones pick up the new version.
-const VERSION = 'v1';
+const VERSION = 'v2';
 const SHELL = `shell-${VERSION}`;
 const FONTS = 'fonts';
 const FILES = ['./', './index.html', './app.css', './app.js', './store.js', './shared.js', './manifest.webmanifest', './icons/apple-touch-icon.png', './icons/icon-192.png', './icons/icon-512.png'];

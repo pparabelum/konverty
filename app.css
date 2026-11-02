@@ -191,6 +191,9 @@ button { -webkit-touch-callout: none; -webkit-user-select: none; user-select: no
 .pct { width: 40px; text-align: center; font-size: 15px; font-weight: 700; flex-shrink: 0; }
 .del { width: 36px; height: 44px; border: 0; background: transparent; display: flex; align-items: center; justify-content: center; flex-shrink: 0; color: var(--dim); }
 .stackbar { display: flex; height: 4px; border-radius: 2px; overflow: hidden; background: var(--track); gap: 2px; margin-bottom: 8px; }
+.seg { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; border-radius: 14px; background: var(--card); border: 1px solid var(--border); margin-bottom: 12px; }
+.seg button { height: 40px; border: 0; border-radius: 10px; background: transparent; font-size: 14px; font-weight: 600; color: var(--muted); }
+.seg button[aria-pressed="true"] { background: var(--text); color: var(--bg); font-weight: 700; }
 .badge { font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--accent); color: var(--accent); }
 .badge.bad { border-color: var(--warn); color: var(--warn); }
 
